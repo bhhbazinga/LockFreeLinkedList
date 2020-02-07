@@ -1,5 +1,6 @@
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -231,13 +232,30 @@ int main(int argc, char const* argv[]) {
     std::atomic<bool> sync = false;
 
     LockFreeLinkedList<int> ll;
+    std::vector<std::thread> threads;
     for (int i = 0; i < 8; ++i) {
-      for (int j = 0; j < 10; ++j) {
-        ll.Insert(j);
-      }
+      threads.emplace_back([&] {
+        while (!sync) {
+          std::this_thread::yield();
+        }
+
+        for (int i = 0; i < 10; ++i) {
+          ll.Insert(i);
+        }
+      });
     }
 
-    std::vector<std::thread> threads;
+    sync = true;
+
+    for (auto& t : threads) {
+      t.join();
+    }
+
+    threads.clear();
+    assert(ll.size() == 10);
+
+    sync = false;
+
     for (int i = 0; i < 8; ++i) {
       threads.emplace_back([&] {
         while (!sync) {
@@ -257,8 +275,8 @@ int main(int argc, char const* argv[]) {
     }
 
     ll.Dump();
+    assert(ll.size() == 0);
   }
-  // assert(ll.size() == 0);
 
   return 0;
 }

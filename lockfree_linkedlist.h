@@ -4,6 +4,9 @@
 #include <atomic>
 #include <cstdio>
 #include <functional>
+#include <mutex>
+
+#include "reclaimer.h"
 
 #define log(fmt, ...)                  \
   do {                                 \
@@ -26,10 +29,10 @@ class LockFreeLinkedList {
     }
   }
 
-  // Find the first node which data is equals or greater
-  // than the given data, then insert the new node before it.
-  void Insert(const T& data) { InsertNode(new Node(data)); }
-  void Insert(T&& data) { InsertNode(new Node(std::move(data))); }
+  // Find the first node which data is greater than the given data,
+  // then insert the new node before it.
+  bool Insert(const T& data) { return InsertNode(new Node(data)); }
+  bool Insert(T&& data) { return InsertNode(new Node(std::move(data))); }
 
   // Find the first node which data is equals to the given data,
   // then delete it.
@@ -37,11 +40,15 @@ class LockFreeLinkedList {
 
   // Find the first node which data is equals to the given data.
   bool Find(const T& data) {
-    Node* left_node;
-    Node* right_node;
-    right_node = Search(data, &left_node);
+    Node* prev;
+    Node* cur;
 
-    return right_node != nullptr && Equals(right_node->data, data);
+    bool found = Search(data, &prev, &cur);
+
+    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    reclaimer.MarkHazard(0, nullptr);
+    reclaimer.MarkHazard(1, nullptr);
+    return found;
   }
 
   // Get size of the list.
@@ -50,27 +57,31 @@ class LockFreeLinkedList {
   // void Foreach(std::function<void, const T & data>) const;
 
   void Dump() {
-    Node* p = head_->next;
+    Node* p = head_;
     while (p != nullptr) {
-      log("%d,ismark=%d->", p->data,
-          is_marked_reference(p->next.load(std::memory_order_acquire)));
-      p = p->next;
+      log("%p,%d,ismark=%d->", p, p->data, is_marked_reference(p->next));
+      p = get_unmarked_reference(p->next);
     }
+    log("%s", "\n\n");
   }
 
  private:
-  void InsertNode(Node* new_node);
+  bool InsertNode(Node* new_node);
 
-  Node* Search(const T& data, Node** left_node);
+  bool Search(const T& data, Node** prev_ptr, Node** cur_ptr);
 
   bool Less(const T& data1, const T& data2) const { return data1 < data2; }
+
+  bool GreaterOrEquals(const T& data1, const T& data2) const {
+    return !(Less(data1, data2));
+  }
 
   bool Equals(const T& data1, const T& data2) const {
     return !Less(data1, data2) && !Less(data2, data1);
   }
 
   bool is_marked_reference(Node* next) const {
-    return (reinterpret_cast<unsigned long>(next) & 0x1) != 0;
+    return (reinterpret_cast<unsigned long>(next) & 0x1) == 0x1;
   }
 
   Node* get_marked_reference(Node* next) const {
@@ -80,6 +91,13 @@ class LockFreeLinkedList {
   Node* get_unmarked_reference(Node* next) const {
     return reinterpret_cast<Node*>(reinterpret_cast<unsigned long>(next) &
                                    ~0x1);
+  }
+
+  void ClearHazardPointer() {
+    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    reclaimer.MarkHazard(0, nullptr);
+    reclaimer.MarkHazard(1, nullptr);
+    reclaimer.ReclaimNoHazardPointer();
   }
 
   struct Node {
@@ -95,103 +113,124 @@ class LockFreeLinkedList {
 
   Node* head_;
   std::atomic<size_t> size_;
+  std::mutex mu_;
 };
 
 template <typename T>
-void LockFreeLinkedList<T>::InsertNode(Node* new_node) {
-  Node* left_node;
-  Node* right_node;
-
+bool LockFreeLinkedList<T>::InsertNode(Node* new_node) {
+  Node* prev;
+  Node* cur;
   do {
-    right_node = Search(new_node->data, &left_node);
-    new_node->next.store(right_node, std::memory_order_release);
-  } while (!left_node->next.compare_exchange_weak(right_node, new_node,
-                                                  std::memory_order_release,
-                                                  std::memory_order_relaxed));
+    if (Search(new_node->data, &prev, &cur)) {
+      // List already contains new_node->data.
+      ClearHazardPointer();
+      delete new_node;
+      return false;
+    }
+
+    new_node->next.store(cur, std::memory_order_release);
+  } while (!prev->next.compare_exchange_weak(
+      cur, new_node, std::memory_order_release, std::memory_order_relaxed));
+
   size_.fetch_add(1, std::memory_order_relaxed);
+  ClearHazardPointer();
+  return true;
 }
 
 template <typename T>
 bool LockFreeLinkedList<T>::Delete(const T& data) {
-  Node* left_node;
-  Node* right_node;
-  Node* right_node_next;
-
+  Node* prev;
+  Node* cur;
+  Node* next;
   do {
     do {
-      right_node = Search(data, &left_node);
-      if (nullptr == right_node || !Equals(right_node->data, data))
+      if (!Search(data, &prev, &cur)) {
+        ClearHazardPointer();
         return false;
+      }
+      next = cur->next.load(std::memory_order_acquire);
+    } while (is_marked_reference(next));
+    // Logically delete cur by marking cur->next.
+  } while (!cur->next.compare_exchange_weak(next, get_marked_reference(next),
+                                            std::memory_order_release,
+                                            std::memory_order_relaxed));
 
-      right_node_next = right_node->next.load(std::memory_order_acquire);
-    } while (is_marked_reference(right_node_next));
-    // Logically delete right_node by marking right_node->next.
-  } while (!right_node->next.compare_exchange_weak(
-      right_node_next, get_marked_reference(right_node_next),
-      std::memory_order_release, std::memory_order_relaxed));
-
-  if (left_node->next.compare_exchange_strong(right_node, right_node_next,
-                                              std::memory_order_release,
-                                              std::memory_order_relaxed)) {
-    // delete right_node;
+  if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release,
+                                         std::memory_order_relaxed)) {
+    size_.fetch_sub(1, std::memory_order_relaxed);
+    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    reclaimer.ReclaimLater(cur,
+                           [](void* ptr) { delete static_cast<Node*>(ptr); });
   } else {
-    right_node = Search(data, &left_node);
+    Search(data, &prev, &cur);
   }
 
-  size_.fetch_sub(1, std::memory_order_relaxed);
+  ClearHazardPointer();
   return true;
 }
 
-// Return adjacent left_node and right_node, and make sure
-// both nodes are unmarked, data of right_node is equals to or greater than
-// the given data.
+// If find node where data is the given data return true,
+// else return false. * cur_ptr point to that node, *prev_ptr is
+// the predecessor of that node.
 template <typename T>
-typename LockFreeLinkedList<T>::Node* LockFreeLinkedList<T>::Search(
-    const T& data, Node** left_node) {
-  Node* left_node_next;
-  Node* right_node;
+bool LockFreeLinkedList<T>::Search(const T& data, Node** prev_ptr,
+                                   Node** cur_ptr) {
+try_again:
+  Node* prev = head_;
+  Node* cur = prev->next.load(std::memory_order_acquire);
+  Node* next;
+  Reclaimer& reclaimer = Reclaimer::GetInstance();
+  while (true) {
+    reclaimer.MarkHazard(0, cur);
+    // Make sure prev is the predecessor of cur,
+    // so that cur is properly marked as hazard.
+    if (prev->next.load(std::memory_order_acquire) != cur) goto try_again;
+    if (nullptr == cur) {
+      *prev_ptr = prev;
+      *cur_ptr = cur;
+      return false;
+    };
 
-  for (;;) {
-    Node* cur = head_;
-    Node* cur_next = head_->next.load(std::memory_order_acquire);
+    next = cur->next.load(std::memory_order_acquire);
+    if (is_marked_reference(next)) {
+      if (!prev->next.compare_exchange_strong(cur,
+                                              get_unmarked_reference(next)))
+        goto try_again;
 
-    // 1.Find left_node and right_node.
-    do {
-      if (!is_marked_reference(cur_next)) {
-        *left_node = static_cast<Node*>(cur);
-        left_node_next = cur_next;
+      reclaimer.ReclaimLater(cur,
+                             [](void* ptr) { delete static_cast<Node*>(ptr); });
+      size_.fetch_sub(1, std::memory_order_relaxed);
+      cur = get_unmarked_reference(next);
+    } else {
+      const T& cur_data = cur->data;
+      // Make sure prev is the predecessor of cur,
+      // so that cur_data is correct.
+      if (prev->next.load(std::memory_order_acquire) != cur) goto try_again;
+
+      // Can not get cur_data after above invocation,
+      // because prev may not be the predecessor of cur at this point.
+      if (GreaterOrEquals(cur_data, data)) {
+        *prev_ptr = prev;
+        *cur_ptr = cur;
+        assert(prev != nullptr);
+        assert(!is_marked_reference(prev));
+        return Equals(cur_data, data);
       }
+      // swap two hazard pointer.
+      void* hp0 = reclaimer.GetHazardPtr(0);
+      void* hp1 = reclaimer.GetHazardPtr(1);
+      reclaimer.MarkHazard(2, hp0);
+      reclaimer.MarkHazard(0, hp1);
+      reclaimer.MarkHazard(1, hp0);
+      reclaimer.MarkHazard(2, nullptr);
 
-      cur = get_unmarked_reference(cur_next);
-      if (nullptr == cur) break;
-
-      cur_next = cur->next.load(std::memory_order_acquire);
-    } while (is_marked_reference(cur_next) || (cur->data < data));
-    right_node = cur;
-
-    // 2. Check nodes are adjacent.
-    if (left_node_next == right_node) {
-      if (right_node != nullptr && is_marked_reference(right_node->next.load(
-                                       std::memory_order_acquire))) {
-        continue;
-      } else {
-        return right_node;
-      }
+      prev = cur;
+      cur = get_unmarked_reference(cur->next.load(std::memory_order_acquire));
     }
+  };
 
-    // 3.Remove one or more marked nodes.
-    if ((*left_node)
-            ->next.compare_exchange_strong(left_node_next, right_node,
-                                           std::memory_order_release,
-                                           std::memory_order_relaxed)) {
-      if (right_node != nullptr && is_marked_reference(right_node->next.load(
-                                       std::memory_order_acquire))) {
-        continue;
-      } else {
-        return right_node;
-      }
-    }
-  }
+  assert(false);
+  return false;
 }
 
 #endif  // LOCKFREE_LINKEDLIST_H

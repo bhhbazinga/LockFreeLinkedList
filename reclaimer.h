@@ -10,8 +10,13 @@
 #include <unordered_set>
 
 // A coefficient that used to calcuate the max number
-// of reclaim node in reclaim list
+// of reclaim node in reclaim list.
 const int kCoefficient = 4 + 1 / 4;
+
+// The number of hazard pointers of each thread
+// is kHarzardPointersPerThread, you should change
+// this value according to your requirement.
+const int kHarzardPointersPerThread = 3;
 
 struct HazardPointer {
   HazardPointer() : ptr(nullptr), next(nullptr) {}
@@ -24,7 +29,7 @@ struct HazardPointer {
 
   std::atomic_flag flag;
   // We must use atomic pointer to ensure the modification
-  // is visible to other threads
+  // is visible to other threads.
   std::atomic<void*> ptr;
   HazardPointer* next;
 };
@@ -32,7 +37,7 @@ struct HazardPointer {
 struct HazardPointerList {
   HazardPointerList() : head(new HazardPointer()) {}
   ~HazardPointerList() {
-    // HazardPointerList destruct when program exit
+    // HazardPointerList destruct when program exit.
     HazardPointer* p = head.load(std::memory_order_acquire);
     while (p) {
       HazardPointer* temp = p;
@@ -47,12 +52,14 @@ struct HazardPointerList {
   std::atomic<size_t> size;
 };
 
+// Global HazardPointerList, each thread checks this structure
+// to determine if a pointer is hazard.
 static HazardPointerList g_hazard_pointer_list;
 
 class Reclaimer {
  public:
   static Reclaimer& GetInstance() {
-    // Each thread has its own reclaimer
+    // Each thread has its own reclaimer.
     thread_local static Reclaimer reclaimer;
     return reclaimer;
   }
@@ -62,20 +69,25 @@ class Reclaimer {
   Reclaimer& operator=(const Reclaimer&) = delete;
   Reclaimer& operator=(Reclaimer&&) = delete;
 
-  // Mark ptr as an hazard pointer
-  // If ptr == nullptr then mask last ptr(that is hazard) as no hazard
-  void MarkHazard(void* const ptr) {
-    // TODO:Try to degrade memory order?
-    hazard_pointer_->ptr.store(ptr, std::memory_order_seq_cst);
+  // Use an hazard pointer at the index of hazard_pointers_ array to mark a ptr
+  // as an hazard pointer pointer.
+  void MarkHazard(int index, void* const ptr) {
+    assert(index < kHarzardPointersPerThread);
+    hazard_pointers_[index]->ptr.store(ptr, std::memory_order_release);
   }
 
-  // Check if the ptr is hazard
+  // Get ptr that marked as hazard at the index of hazard_pointers_ array.
+  void* GetHazardPtr(int index) {
+    assert(index < kHarzardPointersPerThread);
+    return hazard_pointers_[index]->ptr.load(std::memory_order_acquire);
+  }
+
+  // Check if the ptr is hazard.
   bool Hazard(void* const ptr) {
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
     HazardPointer* p = head.load(std::memory_order_acquire);
     do {
-      // TODO:Try to degrade memory order?
-      if (p->ptr.load(std::memory_order_seq_cst) == ptr) {
+      if (p->ptr.load(std::memory_order_acquire) == ptr) {
         return true;
       }
       p = p->next;
@@ -84,7 +96,7 @@ class Reclaimer {
     return false;
   }
 
-  // If ptr is hazard then reclaim it later
+  // If ptr is hazard then reclaim it later.
   void ReclaimLater(void* const ptr, std::function<void(void*)>&& func) {
     ReclaimNode* new_node = reclaim_pool_.Pop();
     new_node->ptr = ptr;
@@ -92,18 +104,18 @@ class Reclaimer {
     reclaim_map_.insert(std::make_pair(ptr, new_node));
   }
 
-  // Try to reclaim all no hazard pointers
+  // Try to reclaim all no hazard pointers.
   void ReclaimNoHazardPointer() {
     if (reclaim_map_.size() < kCoefficient * g_hazard_pointer_list.get_size()) {
       return;
     }
 
-    // Used to speed up the inspection of the ptr
+    // Used to speed up the inspection of the ptr.
     std::unordered_set<void*> not_allow_delete_set;
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
     HazardPointer* p = head.load(std::memory_order_acquire);
     do {
-      void* const ptr = p->ptr.load(std::memory_order_seq_cst);
+      void* const ptr = p->ptr.load(std::memory_order_acquire);
       if (nullptr != ptr) {
         not_allow_delete_set.insert(ptr);
       }
@@ -114,7 +126,7 @@ class Reclaimer {
       if (not_allow_delete_set.find(it->first) == not_allow_delete_set.end()) {
         ReclaimNode* node = it->second;
         node->delete_func(node->ptr);
-        delete node;
+        reclaim_pool_.Push(node);
         it = reclaim_map_.erase(it);
       } else {
         ++it;
@@ -123,41 +135,52 @@ class Reclaimer {
   }
 
  private:
-  Reclaimer() : hazard_pointer_(nullptr) {
+  Reclaimer() {
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
-    HazardPointer* p = head.load(std::memory_order_acquire);
-    do {
-      // Try to get the idle hazard pointer
-      if (!p->flag.test_and_set()) {
-        hazard_pointer_ = p;
-        break;
-      }
-      p = p->next;
-    } while (p);
 
-    if (nullptr == hazard_pointer_) {
-      // No idle hazard pointer, allocate new one
-      HazardPointer* new_head = new HazardPointer();
-      new_head->flag.test_and_set();
-      hazard_pointer_ = new_head;
-      g_hazard_pointer_list.size.fetch_add(1, std::memory_order_relaxed);
-      HazardPointer* old_head = head.load(std::memory_order_relaxed);
+    for (int i = 0; i < kHarzardPointersPerThread; ++i) {
+      HazardPointer* p = head.load(std::memory_order_acquire);
+      HazardPointer* hp = nullptr;
       do {
-        new_head->next = old_head;
-      } while (!head.compare_exchange_weak(old_head, new_head,
-                                           std::memory_order_release,
-                                           std::memory_order_relaxed));
+        // Try to get the idle hazard pointer.
+        if (!p->flag.test_and_set()) {
+          hp = p;
+          break;
+        }
+        p = p->next;
+      } while (p);
+
+      if (nullptr == hp) {
+        // No idle hazard pointer, allocate new one.
+        HazardPointer* new_head = new HazardPointer();
+        new_head->flag.test_and_set();
+        hp = new_head;
+        g_hazard_pointer_list.size.fetch_add(1, std::memory_order_relaxed);
+        HazardPointer* old_head = head.load(std::memory_order_relaxed);
+        do {
+          new_head->next = old_head;
+        } while (!head.compare_exchange_weak(old_head, new_head,
+                                             std::memory_order_release,
+                                             std::memory_order_relaxed));
+      }
+
+      hazard_pointers_[i] = hp;
     }
 
-    assert(nullptr != hazard_pointer_);
+    for (int i = 0; i < kHarzardPointersPerThread; ++i) {
+      assert(hazard_pointers_[i] != nullptr);
+    }
   }
 
   ~Reclaimer() {
     // The Reclaimer destruct when the thread exit
-    assert(nullptr == hazard_pointer_->ptr.load(std::memory_order_relaxed));
 
     // 1.Hand over the hazard pointer
-    hazard_pointer_->flag.clear();
+    for (int i = 0; i < kHarzardPointersPerThread; ++i) {
+      assert(nullptr ==
+             hazard_pointers_[i]->ptr.load(std::memory_order_relaxed));
+      hazard_pointers_[i]->flag.clear();
+    }
 
     // 2.Make sure reclaim all no hazard pointers
     for (auto it = reclaim_map_.begin(); it != reclaim_map_.end();) {
@@ -213,7 +236,8 @@ class Reclaimer {
     ReclaimNode* head;
   };
 
-  HazardPointer* hazard_pointer_;
+  HazardPointer* hazard_pointers_[kHarzardPointersPerThread];
+
   std::unordered_map<void*, ReclaimNode*> reclaim_map_;
   ReclaimPool reclaim_pool_;
 };
