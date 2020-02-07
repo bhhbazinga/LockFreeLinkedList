@@ -3,8 +3,6 @@
 
 #include <atomic>
 #include <cstdio>
-#include <functional>
-#include <mutex>
 
 #include "reclaimer.h"
 
@@ -20,41 +18,49 @@ class LockFreeLinkedList {
  public:
   LockFreeLinkedList() : head_(new Node()), size_(0) {}
 
+  LockFreeLinkedList(const LockFreeLinkedList& other) = delete;
+  LockFreeLinkedList(LockFreeLinkedList&& other) = delete;
+
+  LockFreeLinkedList& operator=(const LockFreeLinkedList& other) = delete;
+  LockFreeLinkedList& operator=(LockFreeLinkedList&& other) = delete;
+
   ~LockFreeLinkedList() {
-    Node* p = head_->next;
+    Node* p = head_;
+    Reclaimer& reclaimer = Reclaimer::GetInstance();
     while (p != nullptr) {
-      Node* temp = p;
-      p = p->next;
-      delete temp;
+      Node* tmp = p;
+      p = p->next.load(std::memory_order_acquire);
+      // When list destructing, all nodes must not hazard,
+      // because each thread clear its own hazard pointers before exit.
+      assert(!reclaimer.Hazard(tmp));
+      delete tmp;
     }
   }
 
   // Find the first node which data is greater than the given data,
-  // then insert the new node before it.
+  // then insert the new node before it then return true, else if
+  // data is already exist in list then return false.
   bool Insert(const T& data) { return InsertNode(new Node(data)); }
   bool Insert(T&& data) { return InsertNode(new Node(std::move(data))); }
 
   // Find the first node which data is equals to the given data,
-  // then delete it.
+  // then delete it and return true, if not found the given data then
+  // return false.
   bool Delete(const T& data);
 
-  // Find the first node which data is equals to the given data.
+  // Find the first node which data is equals to the given data, if not found
+  // the given data then return false.
   bool Find(const T& data) {
     Node* prev;
     Node* cur;
 
     bool found = Search(data, &prev, &cur);
-
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
-    reclaimer.MarkHazard(0, nullptr);
-    reclaimer.MarkHazard(1, nullptr);
+    ClearHazardPointer();
     return found;
   }
 
   // Get size of the list.
   size_t size() const { return size_.load(std::memory_order_relaxed); }
-
-  // void Foreach(std::function<void, const T & data>) const;
 
   void Dump() {
     Node* p = head_;
@@ -113,7 +119,6 @@ class LockFreeLinkedList {
 
   Node* head_;
   std::atomic<size_t> size_;
-  std::mutex mu_;
 };
 
 template <typename T>
@@ -169,8 +174,8 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
   return true;
 }
 
-// If find node where data is the given data return true,
-// else return false. * cur_ptr point to that node, *prev_ptr is
+// Find the first node which data is equals to the given data, if not found
+// the given data then return false. *cur_ptr point to that node, *prev_ptr is
 // the predecessor of that node.
 template <typename T>
 bool LockFreeLinkedList<T>::Search(const T& data, Node** prev_ptr,
@@ -216,10 +221,10 @@ try_again:
         assert(!is_marked_reference(prev));
         return Equals(cur_data, data);
       }
-      // swap two hazard pointer.
+      // swap two hazard pointers.
       void* hp0 = reclaimer.GetHazardPtr(0);
       void* hp1 = reclaimer.GetHazardPtr(1);
-      reclaimer.MarkHazard(2, hp0);
+      reclaimer.MarkHazard(2, hp0);  // Temporarily save hp0.
       reclaimer.MarkHazard(0, hp1);
       reclaimer.MarkHazard(1, hp0);
       reclaimer.MarkHazard(2, nullptr);

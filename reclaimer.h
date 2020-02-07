@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <cassert>
-#include <cstdio>
 #include <functional>
 #include <thread>
 #include <unordered_map>
