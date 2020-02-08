@@ -3,8 +3,8 @@ A lock free linked list implemented in c++20 based on Harris-SetBasedList and Mi
 ## Feature
   * C++20 implementation.
   * Full Thread-safe and Lock-free. 
-  * Set implemented through single linked list.[1]
-  * Use Hazard pointer to manage memory.[2]
+  * Set implemented through single linked list[1].
+  * Use Hazard pointer to manage memory[2].
   * Support Multi-producer & Multi-consumer.
 ## Benchmark
 
@@ -30,5 +30,5 @@ bool Find(const T& data);
 size_t size() const;
 ```
 ## Reference
-[1]A Pragmatic Implementation of Non-BlockingLinked-Lists. Timothy L.Harris
+[1]A Pragmatic Implementation of Non-BlockingLinked-Lists. Timothy L.Harris\
 [2]Hazard Pointers: Safe Memory Reclamation for Lock-Free Objects. Maged M. Michael
