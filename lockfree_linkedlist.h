@@ -8,6 +8,8 @@
 
 template <typename T>
 class LockFreeLinkedList {
+  static_assert(std::is_copy_constructible_v<T>, "T requires copy constructor");
+
   struct Node;
 
  public:
@@ -96,12 +98,12 @@ class LockFreeLinkedList {
 
   struct Node {
     Node() : next(nullptr){};
-    Node(const T& data_) : data(data_), next(nullptr) {}
-    Node(T&& data_) : data(std::move(data_)), next(nullptr) {}
+    Node(const T& data_) : data(new T(data_)), next(nullptr) {}
+    Node(T&& data_) : data(new T(std::move(data_))), next(nullptr) {}
 
-    ~Node(){};
+    ~Node() { delete data; };
 
-    T data;
+    T* data;
     std::atomic<Node*> next;
   };
 
@@ -114,8 +116,8 @@ bool LockFreeLinkedList<T>::InsertNode(Node* new_node) {
   Node* prev;
   Node* cur;
   do {
-    if (Search(new_node->data, &prev, &cur)) {
-      // List already contains new_node->data.
+    if (Search(*new_node->data, &prev, &cur)) {
+      // List already contains *new_node->data.
       ClearHazardPointer();
       delete new_node;
       return false;
@@ -195,7 +197,7 @@ try_again:
       size_.fetch_sub(1, std::memory_order_relaxed);
       cur = get_unmarked_reference(next);
     } else {
-      const T& cur_data = cur->data;
+      const T& cur_data = *cur->data;
       // Make sure prev is the predecessor of cur,
       // so that cur_data is correct.
       if (prev->next.load(std::memory_order_acquire) != cur) goto try_again;

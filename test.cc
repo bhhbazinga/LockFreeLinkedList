@@ -12,6 +12,7 @@ const int kMaxThreads = std::thread::hardware_concurrency();
 
 int maxElements;
 LockFreeLinkedList<int> list;
+
 // Insert sucessfully then ++cnt,  delete succesfully then --cnt.
 std::atomic<int> cnt = 0;
 std::atomic<bool> start = false;
@@ -163,8 +164,8 @@ int main(int argc, char const* argv[]) {
 
   for (int i = 0; i < 3; ++i) {
     maxElements = elements[i];
-    float avg = static_cast<float>(elements2timespan[maxElements][0]) / 10.0f;
-    std::cout << maxElements
+    float avg = static_cast<float>(elements2timespan[maxElements][0])
+    / 10.0f; std::cout << maxElements
               << " elements insert concurrently, average timespan=" << avg
               << "ms"
               << "\n";
