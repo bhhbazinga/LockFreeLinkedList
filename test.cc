@@ -18,24 +18,27 @@ std::atomic<int> cnt = 0;
 std::atomic<bool> start = false;
 std::unordered_map<int, int*> elements2timespan;
 
-void onInsert() {
+void onInsert(int divide) {
   while (!start) {
     std::this_thread::yield();
   }
-  for (int i = 0; i < maxElements; ++i) {
-    if (list.Insert(rand() % maxElements)) {
+
+  int n = maxElements / divide;
+  for (int i = 0; i < n; ++i) {
+    if (list.Insert(rand() % n)) {
       ++cnt;
     }
   }
 }
 
-void onDelete() {
+void onDelete(int divide) {
   while (!start) {
     std::this_thread::yield();
   }
 
-  for (int i = 0; i < maxElements; ++i) {
-    if (list.Delete(rand() % maxElements)) {
+  int n = maxElements / divide;
+  for (int i = 0; i < n; ++i) {
+    if (list.Delete(rand() % n)) {
       --cnt;
     }
   }
@@ -45,7 +48,7 @@ void TestConcurrentInsert() {
   int old_size = list.size();
   std::vector<std::thread> threads;
   for (int i = 0; i < kMaxThreads; ++i) {
-    threads.push_back(std::thread(onInsert));
+    threads.push_back(std::thread(onInsert, kMaxThreads));
   }
 
   start = true;
@@ -69,7 +72,7 @@ void TestConcurrentDelete() {
   int old_size = list.size();
   std::vector<std::thread> threads;
   for (int i = 0; i < kMaxThreads; ++i) {
-    threads.push_back(std::thread(onDelete));
+    threads.push_back(std::thread(onDelete, kMaxThreads));
   }
 
   cnt = 0;
@@ -95,24 +98,25 @@ void TestConcurrentDelete() {
 void TestConcurrentInsertAndDequeue() {
   int old_size = list.size();
 
+  int divide = kMaxThreads / 2;
   std::vector<std::thread> insert_threads;
-  for (int i = 0; i < kMaxThreads / 2; ++i) {
-    insert_threads.push_back(std::thread(onInsert));
+  for (int i = 0; i < divide; ++i) {
+    insert_threads.push_back(std::thread(onInsert, divide));
   }
 
   std::vector<std::thread> delete_threads;
-  for (int i = 0; i < kMaxThreads / 2; ++i) {
-    delete_threads.push_back(std::thread(onDelete));
+  for (int i = 0; i < divide; ++i) {
+    delete_threads.push_back(std::thread(onDelete, divide));
   }
 
   cnt = 0;
   start = true;
   auto t1_ = std::chrono::steady_clock::now();
-  for (int i = 0; i < kMaxThreads / 2; ++i) {
+  for (int i = 0; i < divide; ++i) {
     insert_threads[i].join();
   }
 
-  for (int i = 0; i < kMaxThreads / 2; ++i) {
+  for (int i = 0; i < divide; ++i) {
     delete_threads[i].join();
   }
   auto t2_ = std::chrono::steady_clock::now();
@@ -130,9 +134,9 @@ void TestConcurrentInsertAndDequeue() {
   start = false;
 }
 
-const int kElements1 = 10 * kMaxThreads;
-const int kElements2 = 100 * kMaxThreads;
-const int kElements3 = 1000 * kMaxThreads;
+const int kElements1 = 1000;
+const int kElements2 = 10000;
+const int kElements3 = 100000;
 
 int main(int argc, char const* argv[]) {
   (void)argc;
