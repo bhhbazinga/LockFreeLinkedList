@@ -3,6 +3,7 @@ A lock free linked list implemented in c++20 based on Harris-SetBasedList and Mi
 ## Feature
   * C++20 implementation.
   * Full Thread-safe and Lock-free.
+  * ABA safe.
   * Set implemented through single ordered linked list[1].
   * Use Hazard pointer to manage memory[2].
   * Support Multi-producer & Multi-consumer.
