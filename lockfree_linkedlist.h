@@ -95,7 +95,6 @@ class LockFreeLinkedList {
     Reclaimer& reclaimer = Reclaimer::GetInstance();
     reclaimer.MarkHazard(0, nullptr);
     reclaimer.MarkHazard(1, nullptr);
-    reclaimer.ReclaimNoHazardPointer();
   }
 
   struct Node {
@@ -159,6 +158,7 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
     size_.fetch_sub(1, std::memory_order_relaxed);
     Reclaimer& reclaimer = Reclaimer::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
+    reclaimer.ReclaimNoHazardPointer();
   } else {
     Search(data, &prev, &cur);
   }
@@ -197,6 +197,7 @@ try_again:
         goto try_again;
 
       reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
+      reclaimer.ReclaimNoHazardPointer();
       size_.fetch_sub(1, std::memory_order_relaxed);
       cur = get_unmarked_reference(next);
     } else {
