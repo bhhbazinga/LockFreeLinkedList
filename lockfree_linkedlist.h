@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdio>
 
+#include <iostream>
+
 #include "reclaimer.h"
 
 template <typename T>
@@ -23,13 +25,11 @@ class LockFreeLinkedList {
 
   ~LockFreeLinkedList() {
     Node* p = head_;
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
     while (p != nullptr) {
       Node* tmp = p;
       p = p->next.load(std::memory_order_acquire);
-      // When list destructing, all nodes must not hazard,
-      // because each thread clear its own hazard pointers before exit.
-      assert(!reclaimer.Hazard(tmp));
+      // We can safely delete node, because each thread exits before list
+      // destruct, while thead exiting, it wait all hazard pointers hand over.
       delete tmp;
     }
   }
@@ -87,6 +87,8 @@ class LockFreeLinkedList {
                                    ~0x1);
   }
 
+  static void OnDeleteNode(void* ptr) { delete static_cast<Node*>(ptr); }
+
   // After invoke Search, we should clear hazard pointer,
   // invoke ClearHazardPointer after Insert and Delete.
   void ClearHazardPointer() {
@@ -97,11 +99,13 @@ class LockFreeLinkedList {
   }
 
   struct Node {
-    Node() : next(nullptr){};
+    Node() : data(nullptr), next(nullptr){};
     Node(const T& data_) : data(new T(data_)), next(nullptr) {}
     Node(T&& data_) : data(new T(std::move(data_))), next(nullptr) {}
 
-    ~Node() { delete data; };
+    ~Node() {
+      if (data != nullptr) delete data;
+    };
 
     T* data;
     std::atomic<Node*> next;
@@ -154,8 +158,7 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
                                          std::memory_order_relaxed)) {
     size_.fetch_sub(1, std::memory_order_relaxed);
     Reclaimer& reclaimer = Reclaimer::GetInstance();
-    reclaimer.ReclaimLater(cur,
-                           [](void* ptr) { delete static_cast<Node*>(ptr); });
+    reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
   } else {
     Search(data, &prev, &cur);
   }
@@ -180,6 +183,7 @@ try_again:
     // Make sure prev is the predecessor of cur,
     // so that cur is properly marked as hazard.
     if (prev->next.load(std::memory_order_acquire) != cur) goto try_again;
+
     if (nullptr == cur) {
       *prev_ptr = prev;
       *cur_ptr = cur;
@@ -192,8 +196,7 @@ try_again:
                                               get_unmarked_reference(next)))
         goto try_again;
 
-      reclaimer.ReclaimLater(cur,
-                             [](void* ptr) { delete static_cast<Node*>(ptr); });
+      reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
       size_.fetch_sub(1, std::memory_order_relaxed);
       cur = get_unmarked_reference(next);
     } else {
@@ -211,13 +214,15 @@ try_again:
         assert(!is_marked_reference(prev));
         return Equals(cur_data, data);
       }
-      // swap two hazard pointers.
+      // swap two hazard pointers,
+      // at this point, hp0 point to cur, hp1 point to prev
       void* hp0 = reclaimer.GetHazardPtr(0);
       void* hp1 = reclaimer.GetHazardPtr(1);
       reclaimer.MarkHazard(2, hp0);  // Temporarily save hp0.
       reclaimer.MarkHazard(0, hp1);
       reclaimer.MarkHazard(1, hp0);
       reclaimer.MarkHazard(2, nullptr);
+      // at this point, hp0 point to prev, hp1 point to cur
 
       prev = cur;
       cur = next;
