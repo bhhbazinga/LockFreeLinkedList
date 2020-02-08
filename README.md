@@ -2,8 +2,9 @@
 A lock free linked list implemented in c++20 based on Harris-SetBasedList and Michael-HazardPointer.
 ## Feature
   * C++20 implementation.
-  * Full Thread-safe and Lock-free. 
-  * Set implemented through single linked list[1].
+  * Full Thread-safe and Lock-free.
+  * ABA safe.
+  * Set implemented through single ordered linked list[1].
   * Use Hazard pointer to manage memory[2].
   * Support Multi-producer & Multi-consumer.
 ## Benchmark
@@ -25,7 +26,8 @@ make && ./test
 ## API
 ```C++
 bool Insert(const T& data);
-bool Delete(T&& data);
+bool Insert(T&& data);
+bool Delete(const T& data);
 bool Find(const T& data);
 size_t size() const;
 ```
