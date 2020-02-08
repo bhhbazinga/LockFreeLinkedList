@@ -6,11 +6,6 @@
 
 #include "reclaimer.h"
 
-#define log(fmt, ...)                  \
-  do {                                 \
-    fprintf(stderr, fmt, __VA_ARGS__); \
-  } while (0)
-
 template <typename T>
 class LockFreeLinkedList {
   struct Node;
@@ -62,15 +57,6 @@ class LockFreeLinkedList {
   // Get size of the list.
   size_t size() const { return size_.load(std::memory_order_relaxed); }
 
-  void Dump() {
-    Node* p = head_;
-    while (p != nullptr) {
-      log("%p,%d,ismark=%d->", p, p->data, is_marked_reference(p->next));
-      p = get_unmarked_reference(p->next);
-    }
-    log("%s", "\n\n");
-  }
-
  private:
   bool InsertNode(Node* new_node);
 
@@ -99,6 +85,8 @@ class LockFreeLinkedList {
                                    ~0x1);
   }
 
+  // After invoke Search, we should clear hazard pointer,
+  // invoke ClearHazardPointer after Insert and Delete.
   void ClearHazardPointer() {
     Reclaimer& reclaimer = Reclaimer::GetInstance();
     reclaimer.MarkHazard(0, nullptr);
@@ -230,7 +218,7 @@ try_again:
       reclaimer.MarkHazard(2, nullptr);
 
       prev = cur;
-      cur = get_unmarked_reference(cur->next.load(std::memory_order_acquire));
+      cur = next;
     }
   };
 

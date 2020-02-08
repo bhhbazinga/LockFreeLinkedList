@@ -1,53 +1,50 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "lockfree_linkedlist.h"
 
-const int kMaxThreads = 8;
-static_assert((kMaxThreads & (kMaxThreads - 1)) == 0,
-              "Make sure kMaxThreads == 2^n");
+const int kMaxThreads = std::thread::hardware_concurrency();
 
 int maxElements;
 LockFreeLinkedList<int> list;
-std::atomic<int> cnt(0);
-std::atomic<bool> start(false);
-std::atomic<bool> insert_finish(false);
+// Insert sucessfully then ++cnt,  delete succesfully then --cnt.
+std::atomic<int> cnt = 0;
+std::atomic<bool> start = false;
 std::unordered_map<int, int*> elements2timespan;
 
-void onInsert(int divide) {
+void onInsert() {
   while (!start) {
     std::this_thread::yield();
   }
-  for (int i = 0; i < maxElements / divide; ++i) {
-    if (list.Insert(i)) {
+  for (int i = 0; i < maxElements; ++i) {
+    if (list.Insert(rand() % maxElements)) {
       ++cnt;
     }
   }
 }
 
-void onDelete(int divide) {
+void onDelete() {
   while (!start) {
     std::this_thread::yield();
   }
 
-  while (!insert_finish || list.size() > 0) {
-    for (int i = 0; i < maxElements / divide; ++i) {
-      if (list.Delete(i)) {
-        --cnt;
-      }
+  for (int i = 0; i < maxElements; ++i) {
+    if (list.Delete(rand() % maxElements)) {
+      --cnt;
     }
   }
 }
 
 void TestConcurrentInsert() {
-  insert_finish = false;
+  int old_size = list.size();
   std::vector<std::thread> threads;
   for (int i = 0; i < kMaxThreads; ++i) {
-    threads.push_back(std::thread(onInsert, kMaxThreads));
+    threads.push_back(std::thread(onInsert));
   }
 
   start = true;
@@ -57,7 +54,7 @@ void TestConcurrentInsert() {
   }
   auto t2_ = std::chrono::steady_clock::now();
 
-  assert(static_cast<int>(list.size()) == maxElements / kMaxThreads);
+  assert(cnt + old_size == static_cast<int>(list.size()));
   int ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t2_ - t1_).count();
   elements2timespan[maxElements][0] += ms;
@@ -68,11 +65,10 @@ void TestConcurrentInsert() {
 }
 
 void TestConcurrentDelete() {
-  insert_finish = true;
-
+  int old_size = list.size();
   std::vector<std::thread> threads;
   for (int i = 0; i < kMaxThreads; ++i) {
-    threads.push_back(std::thread(onDelete, kMaxThreads));
+    threads.push_back(std::thread(onDelete));
   }
 
   cnt = 0;
@@ -83,8 +79,7 @@ void TestConcurrentDelete() {
   }
   auto t2_ = std::chrono::steady_clock::now();
 
-  assert(static_cast<int>(list.size()) == 0 &&
-         cnt == -maxElements / kMaxThreads);
+  assert(cnt + old_size == static_cast<int>(list.size()));
   int ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t2_ - t1_).count();
   elements2timespan[maxElements][1] += ms;
@@ -97,15 +92,16 @@ void TestConcurrentDelete() {
 }
 
 void TestConcurrentInsertAndDequeue() {
-  insert_finish = false;
+  int old_size = list.size();
+
   std::vector<std::thread> insert_threads;
   for (int i = 0; i < kMaxThreads / 2; ++i) {
-    insert_threads.push_back(std::thread(onInsert, kMaxThreads / 2));
+    insert_threads.push_back(std::thread(onInsert));
   }
 
   std::vector<std::thread> delete_threads;
   for (int i = 0; i < kMaxThreads / 2; ++i) {
-    delete_threads.push_back(std::thread(onDelete, kMaxThreads / 2));
+    delete_threads.push_back(std::thread(onDelete));
   }
 
   cnt = 0;
@@ -115,14 +111,12 @@ void TestConcurrentInsertAndDequeue() {
     insert_threads[i].join();
   }
 
-  insert_finish = true;
-
   for (int i = 0; i < kMaxThreads / 2; ++i) {
     delete_threads[i].join();
   }
   auto t2_ = std::chrono::steady_clock::now();
 
-  assert(static_cast<int>(list.size()) == 0 && cnt == 0);
+  assert(cnt + old_size == static_cast<int>(list.size()));
   int ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t2_ - t1_).count();
   elements2timespan[maxElements][2] += ms;
@@ -135,15 +129,15 @@ void TestConcurrentInsertAndDequeue() {
   start = false;
 }
 
-std::unordered_map<int, int> element2count[kMaxThreads / 2];
-
-const int kElements1 = 800;
-const int kElements2 = 8000;
-const int kElements3 = 80000;
+const int kElements1 = 10 * kMaxThreads;
+const int kElements2 = 100 * kMaxThreads;
+const int kElements3 = 1000 * kMaxThreads;
 
 int main(int argc, char const* argv[]) {
   (void)argc;
   (void)argv;
+
+  srand(std::time(0));
 
   std::cout << "Benchmark with " << kMaxThreads << " threads:"
             << "\n";
