@@ -25,7 +25,8 @@ make && ./test
 ## API
 ```C++
 bool Insert(const T& data);
-bool Delete(T&& data);
+bool Insert(T&& data);
+bool Delete(const T& data);
 bool Find(const T& data);
 size_t size() const;
 ```
