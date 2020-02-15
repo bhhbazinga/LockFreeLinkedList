@@ -37,7 +37,7 @@ struct HazardPointerList {
   HazardPointerList() : head(new HazardPointer()) {}
   ~HazardPointerList() {
     // HazardPointerList destruct when program exit.
-    HazardPointer* p = head.load(std::memory_order_acquire);
+    HazardPointer* p = head.load(std::memory_order_consume);
     while (p) {
       HazardPointer* temp = p;
       p = p->next;
@@ -78,15 +78,15 @@ class Reclaimer {
   // Get ptr that marked as hazard at the index of hazard_pointers_ array.
   void* GetHazardPtr(int index) {
     assert(index < kHarzardPointersPerThread);
-    return hazard_pointers_[index]->ptr.load(std::memory_order_acquire);
+    return hazard_pointers_[index]->ptr.load(std::memory_order_consume);
   }
 
   // Check if the ptr is hazard.
   bool Hazard(void* const ptr) {
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
-    HazardPointer* p = head.load(std::memory_order_acquire);
+    HazardPointer* p = head.load(std::memory_order_consume);
     do {
-      if (p->ptr.load(std::memory_order_acquire) == ptr) {
+      if (p->ptr.load(std::memory_order_consume) == ptr) {
         return true;
       }
       p = p->next;
@@ -112,9 +112,9 @@ class Reclaimer {
     // Used to speed up the inspection of the ptr.
     std::unordered_set<void*> not_allow_delete_set;
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
-    HazardPointer* p = head.load(std::memory_order_acquire);
+    HazardPointer* p = head.load(std::memory_order_consume);
     do {
-      void* const ptr = p->ptr.load(std::memory_order_acquire);
+      void* const ptr = p->ptr.load(std::memory_order_consume);
       if (nullptr != ptr) {
         not_allow_delete_set.insert(ptr);
       }
@@ -138,7 +138,7 @@ class Reclaimer {
     std::atomic<HazardPointer*>& head = g_hazard_pointer_list.head;
 
     for (int i = 0; i < kHarzardPointersPerThread; ++i) {
-      HazardPointer* p = head.load(std::memory_order_acquire);
+      HazardPointer* p = head.load(std::memory_order_consume);
       HazardPointer* hp = nullptr;
       do {
         // Try to get the idle hazard pointer.

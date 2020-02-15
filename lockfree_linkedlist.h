@@ -173,11 +173,11 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
 template <typename T>
 bool LockFreeLinkedList<T>::Search(const T& data, Node** prev_ptr,
                                    Node** cur_ptr) {
+  Reclaimer& reclaimer = Reclaimer::GetInstance();
 try_again:
   Node* prev = head_;
   Node* cur = prev->next.load(std::memory_order_acquire);
   Node* next;
-  Reclaimer& reclaimer = Reclaimer::GetInstance();
   while (true) {
     reclaimer.MarkHazard(0, cur);
     // Make sure prev is the predecessor of cur,
@@ -211,8 +211,6 @@ try_again:
       if (GreaterOrEquals(cur_data, data)) {
         *prev_ptr = prev;
         *cur_ptr = cur;
-        assert(prev != nullptr);
-        assert(!is_marked_reference(prev));
         return Equals(cur_data, data);
       }
       // swap two hazard pointers,
