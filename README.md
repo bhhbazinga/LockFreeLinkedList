@@ -1,10 +1,10 @@
 # LockFreeLinkedList
-A lock free linked list implemented in c++20 based on Harris-SetBasedList and Michael-HazardPointer.
+Lock Free Linked List Based On Harris'OrderedListBasedSet And Michael's Hazard Pointer.
 ## Feature
   * C++20 implementation.
-  * Full Thread-safe and Lock-free.
+  * Thread-safe and Lock-free.
   * ABA safe.
-  * Set implemented through single ordered linked list[1].
+  * Set implemented through singly ordered linked list[1].
   * Use Hazard pointer to manage memory[2].
   * Support Multi-producer & Multi-consumer.
 ## Benchmark
