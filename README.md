@@ -1,7 +1,6 @@
 # LockFreeLinkedList
 Lock Free Linked List Based On Harris'OrderedListBasedSet And Michael's Hazard Pointer.
 ## Feature
-  * C++20 implementation.
   * Thread-safe and Lock-free.
   * ABA safe.
   * Set implemented through singly ordered linked list[1].
