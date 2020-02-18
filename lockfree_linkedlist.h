@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-#include "reclaimer.h"
+#include "HazardPointer/reclaimer.h"
 
 template <typename T>
 class LockFreeLinkedList {
@@ -92,7 +92,7 @@ class LockFreeLinkedList {
   // After invoke Search, we should clear hazard pointer,
   // invoke ClearHazardPointer after Insert and Delete.
   void ClearHazardPointer() {
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
     reclaimer.MarkHazard(0, nullptr);
     reclaimer.MarkHazard(1, nullptr);
   }
@@ -112,6 +112,7 @@ class LockFreeLinkedList {
 
   Node* head_;
   std::atomic<size_t> size_;
+  HazardPointerList hazard_pointer_list_;
 };
 
 template <typename T>
@@ -156,7 +157,7 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
   if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release,
                                          std::memory_order_relaxed)) {
     size_.fetch_sub(1, std::memory_order_relaxed);
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
     reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();
   } else {
@@ -173,7 +174,7 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
 template <typename T>
 bool LockFreeLinkedList<T>::Search(const T& data, Node** prev_ptr,
                                    Node** cur_ptr) {
-  Reclaimer& reclaimer = Reclaimer::GetInstance();
+  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
 try_again:
   Node* prev = head_;
   Node* cur = prev->next.load(std::memory_order_acquire);

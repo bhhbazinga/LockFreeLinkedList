@@ -7,7 +7,7 @@ EXEC = test
 
 all: $(EXEC)
 
-$(EXEC): test.cc lockfree_linkedlist.h reclaimer.h
+$(EXEC): test.cc lockfree_linkedlist.h
 	$(CXX) $(CXXFLAGS) -o $(EXEC) test.cc
 
 .Phony : clean
