@@ -9,8 +9,12 @@
 #include "HazardPointer/reclaimer.h"
 
 template <typename T>
+class ListReclaimer;
+
+template <typename T>
 class LockFreeLinkedList {
   static_assert(std::is_copy_constructible_v<T>, "T requires copy constructor");
+  friend ListReclaimer<T>;
 
   struct Node;
 
@@ -50,9 +54,8 @@ class LockFreeLinkedList {
   bool Find(const T& data) {
     Node* prev;
     Node* cur;
-
-    bool found = Search(data, &prev, &cur);
-    ClearHazardPointer();
+    HazardPointer prev_hp, cur_hp;
+    bool found = Search(data, &prev, &cur, prev_hp, cur_hp);
     return found;
   }
 
@@ -62,7 +65,8 @@ class LockFreeLinkedList {
  private:
   bool InsertNode(Node* new_node);
 
-  bool Search(const T& data, Node** prev_ptr, Node** cur_ptr);
+  bool Search(const T& data, Node** prev_ptr, Node** cur_ptr,
+              HazardPointer& prev_hp, HazardPointer& cur_hp);
 
   bool Less(const T& data1, const T& data2) const { return data1 < data2; }
 
@@ -89,14 +93,6 @@ class LockFreeLinkedList {
 
   static void OnDeleteNode(void* ptr) { delete static_cast<Node*>(ptr); }
 
-  // After invoke Search, we should clear hazard pointer,
-  // invoke ClearHazardPointer after Insert and Delete.
-  void ClearHazardPointer() {
-    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
-    reclaimer.MarkHazard(0, nullptr);
-    reclaimer.MarkHazard(1, nullptr);
-  }
-
   struct Node {
     Node() : data(nullptr), next(nullptr){};
     Node(const T& data_) : data(new T(data_)), next(nullptr) {}
@@ -112,17 +108,35 @@ class LockFreeLinkedList {
 
   Node* head_;
   std::atomic<size_t> size_;
-  HazardPointerList hazard_pointer_list_;
+  static Reclaimer::HazardPointerList global_hp_list_;
+};
+
+template <typename T>
+Reclaimer::HazardPointerList LockFreeLinkedList<T>::global_hp_list_;
+
+template <typename T>
+class ListReclaimer : public Reclaimer {
+  friend LockFreeLinkedList<T>;
+
+ private:
+  ListReclaimer(HazardPointerList& hp_list) : Reclaimer(hp_list) {}
+  ~ListReclaimer() override = default;
+
+  static ListReclaimer<T>& GetInstance() {
+    thread_local static ListReclaimer reclaimer(
+        LockFreeLinkedList<T>::global_hp_list_);
+    return reclaimer;
+  }
 };
 
 template <typename T>
 bool LockFreeLinkedList<T>::InsertNode(Node* new_node) {
   Node* prev;
   Node* cur;
+  HazardPointer prev_hp, cur_hp;
   do {
-    if (Search(*new_node->data, &prev, &cur)) {
+    if (Search(*new_node->data, &prev, &cur, prev_hp, cur_hp)) {
       // List already contains *new_node->data.
-      ClearHazardPointer();
       delete new_node;
       return false;
     }
@@ -132,7 +146,6 @@ bool LockFreeLinkedList<T>::InsertNode(Node* new_node) {
       cur, new_node, std::memory_order_release, std::memory_order_relaxed));
 
   size_.fetch_add(1, std::memory_order_relaxed);
-  ClearHazardPointer();
   return true;
 }
 
@@ -141,10 +154,10 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
   Node* prev;
   Node* cur;
   Node* next;
+  HazardPointer prev_hp, cur_hp;
   do {
     do {
-      if (!Search(data, &prev, &cur)) {
-        ClearHazardPointer();
+      if (!Search(data, &prev, &cur, prev_hp, cur_hp)) {
         return false;
       }
       next = cur->next.load(std::memory_order_acquire);
@@ -157,14 +170,15 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
   if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release,
                                          std::memory_order_relaxed)) {
     size_.fetch_sub(1, std::memory_order_relaxed);
-    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+    auto& reclaimer = ListReclaimer<T>::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeLinkedList<T>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();
   } else {
-    Search(data, &prev, &cur);
+    prev_hp.UnMark();
+    cur_hp.UnMark();
+    Search(data, &prev, &cur, prev_hp, cur_hp);
   }
 
-  ClearHazardPointer();
   return true;
 }
 
@@ -173,14 +187,16 @@ bool LockFreeLinkedList<T>::Delete(const T& data) {
 // the predecessor of that node.
 template <typename T>
 bool LockFreeLinkedList<T>::Search(const T& data, Node** prev_ptr,
-                                   Node** cur_ptr) {
-  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+                                   Node** cur_ptr, HazardPointer& prev_hp,
+                                   HazardPointer& cur_hp) {
+  auto& reclaimer = ListReclaimer<T>::GetInstance();
 try_again:
   Node* prev = head_;
   Node* cur = prev->next.load(std::memory_order_acquire);
   Node* next;
   while (true) {
-    reclaimer.MarkHazard(0, cur);
+    cur_hp.UnMark();
+    cur_hp = HazardPointer(&reclaimer, cur);
     // Make sure prev is the predecessor of cur,
     // so that cur is properly marked as hazard.
     if (prev->next.load(std::memory_order_acquire) != cur) goto try_again;
@@ -214,15 +230,11 @@ try_again:
         *cur_ptr = cur;
         return Equals(cur_data, data);
       }
-      // swap two hazard pointers,
-      // at this point, hp0 point to cur, hp1 point to prev
-      void* hp0 = reclaimer.GetHazardPtr(0);
-      void* hp1 = reclaimer.GetHazardPtr(1);
-      reclaimer.MarkHazard(2, hp0);  // Temporarily save hp0.
-      reclaimer.MarkHazard(0, hp1);
-      reclaimer.MarkHazard(1, hp0);
-      reclaimer.MarkHazard(2, nullptr);
-      // at this point, hp0 point to prev, hp1 point to cur
+
+      // Swap cur_hp and prev_hp.
+      HazardPointer tmp = std::move(cur_hp);
+      cur_hp = std::move(prev_hp);
+      prev_hp = std::move(tmp);
 
       prev = cur;
       cur = next;
