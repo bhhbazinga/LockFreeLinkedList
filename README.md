@@ -26,6 +26,7 @@ make && ./test
 ```C++
 bool Insert(const T& data);
 bool Insert(T&& data);
+bool Emplace(Args&&... args);
 bool Delete(const T& data);
 bool Find(const T& data);
 size_t size() const;
