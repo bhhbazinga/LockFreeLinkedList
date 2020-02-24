@@ -41,8 +41,20 @@ class LockFreeLinkedList {
   // Find the first node which data is greater than the given data,
   // then insert the new node before it then return true, else if
   // data is already exist in list then return false.
-  bool Insert(const T& data) { return InsertNode(new Node(data)); }
-  bool Insert(T&& data) { return InsertNode(new Node(std::move(data))); }
+  template <typename... Args>
+  bool Emplace(Args&&... args);
+
+  bool Insert(const T& data) {
+    static_assert(std::is_copy_constructible<T>::value,
+                  "T must be copy constructible");
+    return Emplace(data);
+  }
+
+  bool Insert(T&& data) {
+    static_assert(std::is_constructible_v<T, T&&>,
+                  "T must be constructible with T&&");
+    return Emplace(std::forward<T>(data));
+  }
 
   // Find the first node which data is equals to the given data,
   // then delete it and return true, if not found the given data then
@@ -95,8 +107,10 @@ class LockFreeLinkedList {
 
   struct Node {
     Node() : data(nullptr), next(nullptr){};
-    Node(const T& data_) : data(new T(data_)), next(nullptr) {}
-    Node(T&& data_) : data(new T(std::move(data_))), next(nullptr) {}
+
+    template <typename... Args>
+    Node(Args&&... args)
+        : data(new T(std::forward<Args>(args)...)), next(nullptr) {}
 
     ~Node() {
       if (data != nullptr) delete data;
@@ -130,7 +144,9 @@ class ListReclaimer : public Reclaimer {
 };
 
 template <typename T>
-bool LockFreeLinkedList<T>::InsertNode(Node* new_node) {
+template <typename... Args>
+bool LockFreeLinkedList<T>::Emplace(Args&&... args) {
+  Node* new_node = new Node(std::forward<Args>(args)...);
   Node* prev;
   Node* cur;
   HazardPointer prev_hp, cur_hp;
