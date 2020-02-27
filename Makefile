@@ -11,7 +11,7 @@ $(EXEC): test.cc lockfree_linkedlist.h HazardPointer/reclaimer.h
 	$(CXX) $(CXXFLAGS) -o $(EXEC) test.cc
 
 HazardPointer/reclaimer.h:
-	git submodule update --remote
+	git submodule update --remote --recursive --init
 
 .Phony : clean
 
